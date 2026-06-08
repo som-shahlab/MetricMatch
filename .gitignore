@@ -1,0 +1,13 @@
+results/
+__pycache__/
+data/
+results/
+scripts/private.txt
+deprecated/
+*.egg-info/
+pyproject.toml
+*.out
+*.sh
+deprecated_experiments/*
+deprecated_merge/
+CLAUDE.md
