@@ -44,13 +44,12 @@ DEFAULT_N_BOOTSTRAP_SAMPLES = 40
 DEFAULT_N_CANDIDATE_SUBSETS = 20
 DEFAULT_TOTAL_ANNOTATIONS = 300
 DEFAULT_DATASET = "hanna"
-DEFAULT_MODEL_NAMES = ["gpt-4o-mini", "meta-llama-Llama-3.1-8B-Instruct", "google-gemma-3-1b-it", "Qwen-Qwen2.5-7B-Instruct"] #["claude-3.5-sonnet", "gpt-4.1", "gpt-5", "deepseek-r1", "gemini-2.5-pro"]
+DEFAULT_MODEL_NAMES = ["claude-3.5-sonnet", "gpt-4.1", "gpt-5", "deepseek-r1", "gemini-2.5-pro"]
 DEFAULT_TARGET_MODELS = None   # None → same as model_names
-DEFAULT_ENSEMBLE_MODELS = None #["gpt-4o-mini", "meta-llama-Llama-3.1-8B-Instruct", "google-gemma-3-1b-it", "Qwen-Qwen2.5-7B-Instruct"] #("gpt-4o-mini" "meta-llama-Llama-3.1-8B-Instruct" "google-gemma-3-1b-it" "Qwen-Qwen2.5-7B-Instruct") #("claude-3.5-sonnet" "gpt-4.1" "gpt-5" "deepseek-r1" "gemini-2.5-pro") #("gpt-4o-mini" "meta-llama-Llama-3.1-8B-Instruct" "google-gemma-3-1b-it" "Qwen-Qwen2.5-7B-Instruct")   # None → same as model_names
+DEFAULT_ENSEMBLE_MODELS = None #["gpt-4o-mini", "meta-llama-Llama-3.1-8B-Instruct", "google-gemma-3-1b-it", "Qwen-Qwen2.5-7B-Instruct"] 
 DEFAULT_DATA_DIR = "data/judge_scores"
 DEFAULT_PLOTS_DIR = f"results/{DEFAULT_DATASET}"
 DEFAULT_COMPARISON_MODE = "pairwise_average"
-DEFAULT_ONLINE_ACQUISITION = False
 DEFAULT_STEP_SIZE = 5
 DEFAULT_MAX_BUDGET = 50
 
@@ -153,13 +152,6 @@ def parse_args():
              "If provided, skips computation and loads saved DataFrames to regenerate plots."
     )
     parser.add_argument(
-        "--online-acquisition", action=argparse.BooleanOptionalAction,
-        default=DEFAULT_ONLINE_ACQUISITION,
-        help="If True (default), IDs selected at budget k are locked in and carried forward "
-             "to larger budgets (online/incremental). If False, each budget level independently "
-             "samples k items from scratch (batch selection)."
-    )
-    parser.add_argument(
         "--step-size", type=int, default=DEFAULT_STEP_SIZE,
         help=f"Step size for annotation budget levels (default: {DEFAULT_STEP_SIZE}). "
              "E.g. 5 → budgets [5, 10, 15, ...], 1 → budgets [5, 6, 7, ...]."
@@ -189,7 +181,6 @@ models_to_load = [m for m in (target_models + ensemble_models) if not (m in _see
 DATA_DIR = args.data_dir
 PLOTS_DIR = args.plots_dir
 COMPARISON_MODE = args.comparison_mode
-ONLINE_ACQUISITION = args.online_acquisition
 STEP_SIZE = args.step_size
 MAX_BUDGET = args.max_budget
 
@@ -481,20 +472,17 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                           im_models=None, true_im_icc=None, true_im_alpha=None, true_im_rho=None, true_im_tau=None, true_im_msre=None,
                           past_im_msb_obs=None, past_im_mse_obs=None,
                           past_hm_msb_obs=None, past_hm_mse_obs=None,
-                          prev_selected_per_trial=None,
-                          online_acquisition=True,
                           fast_ms_fn=None):
     """Run trials for all strategy variants that share the same base sampling method. Accepts strategy name as well as target values to match on
     and past observations to use for bias correction of those targets (for "_tc" strategies).
 
     Returns:
         tuple: (
-            results                   – dict mapping strategy name -> {"icc_errors", "alpha_errors"},
-            new_im_msb_obs            – IM MSB values observed in this call's trials,
-            new_im_mse_obs            – IM MSE values observed in this call's trials,
-            new_hm_msb_obs            – HM MSB values observed in this call's trials,
-            new_hm_mse_obs            – HM MSE values observed in this call's trials,
-            updated_selected_per_trial – updated dict mapping trial_idx -> selected IDs,
+            results        – dict mapping strategy name -> {"icc_errors", "alpha_errors"},
+            new_im_msb_obs – IM MSB values observed in this call's trials,
+            new_im_mse_obs – IM MSE values observed in this call's trials,
+            new_hm_msb_obs – HM MSB values observed in this call's trials,
+            new_hm_mse_obs – HM MSE values observed in this call's trials,
         )
     """
     if past_im_msb_obs is None:
@@ -505,8 +493,6 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
         past_hm_msb_obs = []
     if past_hm_mse_obs is None:
         past_hm_mse_obs = []
-    if prev_selected_per_trial is None:
-        prev_selected_per_trial = {}
     # fast_ms_fn skips expensive pivot_table validation on clean candidate subsets.
     if fast_ms_fn is None:
         fast_ms_fn = compute_ms_components
@@ -535,17 +521,9 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
     new_hm_msb_obs = []
     new_hm_mse_obs = []
 
-    # Copy so we can update and return without mutating the caller's dict.
-    updated_selected_per_trial = dict(prev_selected_per_trial)
     sampled_ids_list=[]
     for trial_idx in range(actual_trials):
         seed = SEED + trial_idx
-
-        # IDs locked in from prior budget levels for this trial (online mode only).
-        if online_acquisition:
-            forced_ids = updated_selected_per_trial.get(trial_idx, np.array([], dtype=text_ids.dtype))
-        else:
-            forced_ids = np.array([], dtype=text_ids.dtype)
 
         # ── Compute effective selection targets ────────────────────────────────
         # For _tc (target-corrected) strategies: adjust targets using the mean
@@ -578,22 +556,14 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
             effective_msb_target = im_msb_target
             effective_mse_target = im_mse_target
 
-        # ── Sample once (only incremental IDs beyond forced_ids) ───────────────
-        # breakpoint()
+        # ── Sample ───────────────────────────────────────────────────────────
         if base_strategy == "random":
             np.random.seed(seed)
-            # available = np.setdiff1d(text_ids, forced_ids)
-            # n_new = min(k - len(forced_ids), len(available))
-            # if n_new > 0:
             sampled_ids = np.random.choice(text_ids, size=min(k, len(text_ids)), replace=False)
-            # breakpoint()
-                # sampled_ids = np.concatenate([forced_ids, new_ids]) if len(forced_ids) > 0 else new_ids
-            # else:
-                # sampled_ids = forced_ids[:k]
 
         elif base_strategy == "stratified":
             sampled_ids = stratified_target_selection(
-                text_ids, k, target_scores_for_stratified, seed=seed, forced_ids=forced_ids
+                text_ids, k, target_scores_for_stratified, seed=seed
             )
         elif base_strategy in _SCORE_METHOD_MAP:
             if COMPARISON_MODE == "pairwise_average":
@@ -602,7 +572,7 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     fast_ms_fn, seed=seed, n_candidates=N_CANDIDATE_SUBSETS,
                     score_method=_SCORE_METHOD_MAP[base_strategy],
                     msb_weight=_WEIGHTED_MSB_WEIGHTS.get(base_strategy, 0.5),
-                    forced_ids=forced_ids, target_model=model
+                    target_model=model
                 )
             else:
                 sampled_ids = variance_matched_selection_ms(
@@ -610,7 +580,6 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     fast_ms_fn, seed=seed, n_candidates=N_CANDIDATE_SUBSETS,
                     score_method=_SCORE_METHOD_MAP[base_strategy],
                     msb_weight=_WEIGHTED_MSB_WEIGHTS.get(base_strategy, 0.5),
-                    forced_ids=forced_ids
                 )
             if sampled_ids is None:
                 continue
@@ -620,7 +589,7 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_pair_df, true_im_icc, "icc",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids, target_model=model,
+                    target_model=model,
                     compute_rho_fn=compute_spearman_rho, compute_tau_fn=compute_kendall_tau
                 )
             else:
@@ -628,7 +597,6 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_full_df, true_im_icc, "icc",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids
                 )
             if sampled_ids is None:
                 continue
@@ -638,7 +606,7 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_pair_df, true_im_alpha, "alpha",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids, target_model=model,
+                    target_model=model,
                     compute_rho_fn=compute_spearman_rho, compute_tau_fn=compute_kendall_tau
                 )
             else:
@@ -646,7 +614,6 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_full_df, true_im_alpha, "alpha",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids
                 )
             if sampled_ids is None:
                 continue
@@ -656,7 +623,7 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_pair_df, true_im_rho, "rho",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids, target_model=model,
+                    target_model=model,
                     compute_rho_fn=compute_spearman_rho, compute_tau_fn=compute_kendall_tau
                 )
             else:
@@ -664,7 +631,7 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_full_df, true_im_rho, "rho",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids, compute_rho_fn=compute_spearman_rho
+                    compute_rho_fn=compute_spearman_rho
                 )
             if sampled_ids is None:
                 continue
@@ -674,7 +641,7 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_pair_df, true_im_tau, "tau",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids, target_model=model,
+                    target_model=model,
                     compute_rho_fn=compute_spearman_rho, compute_tau_fn=compute_kendall_tau
                 )
             else:
@@ -682,7 +649,7 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_full_df, true_im_tau, "tau",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids, compute_tau_fn=compute_kendall_tau
+                    compute_tau_fn=compute_kendall_tau
                 )
             if sampled_ids is None:
                 continue
@@ -692,7 +659,7 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_pair_df, true_im_msre, "mse",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids, target_model=model,
+                    target_model=model,
                     compute_rho_fn=compute_spearman_rho, compute_tau_fn=compute_kendall_tau
                 )
             else:
@@ -700,7 +667,6 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                     text_ids, k, im_full_df, true_im_msre, "mse",
                     fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                     seed=seed, n_candidates=N_CANDIDATE_SUBSETS, im_models=im_models,
-                    forced_ids=forced_ids
                 )
             if sampled_ids is None:
                 continue
@@ -712,7 +678,7 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
             sampled_ids = variance_matched_selection_ms(
                 text_ids, k, im_full_df, hm_msb_target, hm_mse_target,
                 fast_ms_fn, seed=seed, n_candidates=N_CANDIDATE_SUBSETS,
-                score_method="combined", forced_ids=forced_ids
+                score_method="combined",
             )
             if sampled_ids is None:
                 continue
@@ -724,7 +690,6 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                 fast_ms_fn, seed=seed, n_candidates=N_CANDIDATE_SUBSETS,
                 score_method=_ORACLE_SCORE_METHOD[base_strategy],
                 msb_weight=_ORACLE_WEIGHTED_MSB_WEIGHTS.get(base_strategy, 0.5),
-                forced_ids=forced_ids
             )
             if sampled_ids is None:
                 continue
@@ -738,23 +703,18 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                 text_ids, k, hm_full_df, target_val, target_metric,
                 fast_ms_fn, compute_icc_pingouin, compute_krippendorff_alpha,
                 seed=seed, n_candidates=N_CANDIDATE_SUBSETS,
-                im_models=[model, "original"], forced_ids=forced_ids,
+                im_models=[model, "original"],
                 compute_rho_fn=compute_spearman_rho,
                 compute_tau_fn=compute_kendall_tau,
             )
             if sampled_ids is None:
                 continue
         elif base_strategy == "max_expand":
-            sampled_ids = max_expand_selection(im_full_df, k, compute_ms_components,
-                                               forced_ids=forced_ids)
+            sampled_ids = max_expand_selection(im_full_df, k, compute_ms_components)
             if sampled_ids is None:
                 continue
         else:
             continue
-
-        # Record this trial's selected IDs for the next budget level (online mode only).
-        if online_acquisition:
-            updated_selected_per_trial[trial_idx] = np.asarray(sampled_ids)
 
         hm_sample = hm_full_df[hm_full_df["text_id"].isin(sampled_ids)]
         sampled_ids_list.append(sampled_ids)
@@ -833,12 +793,11 @@ def _run_trials_for_base(base_strategy, strategy_variants, text_ids, k, n_trials
                 if est_tau is not None and np.isfinite(est_tau) and true_tau is not None and np.isfinite(true_tau):
                     results[strategy]["tau_errors"].append(min(2, abs(est_tau - true_tau)))
                     results[strategy]["tau_preds"].append(est_tau)
-    return results, new_im_msb_obs, new_im_mse_obs, new_hm_msb_obs, new_hm_mse_obs, updated_selected_per_trial, sampled_ids_list
+    return results, new_im_msb_obs, new_im_mse_obs, new_hm_msb_obs, new_hm_mse_obs, sampled_ids_list
 
 
 def evaluate_reliability_estimators(df, target_models, ensemble_models, per_model_variance,
-                                     budgets=range(5, 55, 5), n_trials=None,
-                                     online_acquisition=False):
+                                     budgets=range(5, 55, 5), n_trials=None):
     """
     Evaluate reliability estimators with different sampling strategies.
 
@@ -849,8 +808,6 @@ def evaluate_reliability_estimators(df, target_models, ensemble_models, per_mode
         per_model_variance: Dict from compute_variance_alignment
         budgets: Range of annotation budgets to test
         n_trials: Number of bootstrap trials (defaults to N_BOOTSTRAP_SAMPLES)
-        online_acquisition: If True (default), selected IDs carry forward across budget
-            levels. If False, each budget level samples k items independently (batch).
 
     Returns:
         results for each target reliability metric
@@ -978,10 +935,9 @@ def evaluate_reliability_estimators(df, target_models, ensemble_models, per_mode
             past_im_mse_obs = []
             past_hm_msb_obs = []
             past_hm_mse_obs = []
-            prev_selected_per_trial = {}  # trial_idx -> array of IDs selected so far
 
             for k in budgets:
-                trial_results, new_im_msb, new_im_mse, new_hm_msb, new_hm_mse, prev_selected_per_trial, sampled_ids_list = (
+                trial_results, new_im_msb, new_im_mse, new_hm_msb, new_hm_mse, sampled_ids_list = (
                     _run_trials_for_base(
                         base_strategy, strategy_variants, text_ids, k, n_trials,
                         hm_full_df, im_full_df, im_pair_df, model, true_icc, true_alpha, true_msre,
@@ -991,8 +947,6 @@ def evaluate_reliability_estimators(df, target_models, ensemble_models, per_mode
                         im_models=im_models, true_im_icc=im_icc, true_im_alpha=im_alpha, true_im_rho=im_rho, true_im_tau=im_tau, true_im_msre=im_msre,
                         past_im_msb_obs=past_im_msb_obs, past_im_mse_obs=past_im_mse_obs,
                         past_hm_msb_obs=past_hm_msb_obs, past_hm_mse_obs=past_hm_mse_obs,
-                        prev_selected_per_trial=prev_selected_per_trial,
-                        online_acquisition=online_acquisition,
                         fast_ms_fn=_fast_ms,
                     )
                 )
@@ -1042,7 +996,6 @@ def _run_axis_worker(args):
     axis_icc, axis_alpha, axis_msre, axis_rho, axis_tau, axis_metadata = evaluate_reliability_estimators(
         axis_df, target_models, ensemble_models, axis_per_model_variance,
         budgets=range(5, MAX_BUDGET + 1, STEP_SIZE),
-        online_acquisition=ONLINE_ACQUISITION
     )
     return axis, axis_icc, axis_alpha, axis_msre, axis_rho, axis_tau, axis_metadata, axis_per_model_variance
 
@@ -1080,7 +1033,7 @@ def main():
 
     if n_workers > 1:
         # Use fork-based pool so worker processes inherit all module-level globals
-        # (COMPARISON_MODE, ONLINE_ACQUISITION, N_BOOTSTRAP_SAMPLES, etc.).
+        # (COMPARISON_MODE, N_BOOTSTRAP_SAMPLES, etc.).
         ctx = mp.get_context("fork")
         with ctx.Pool(processes=n_workers) as pool:
             axis_results = pool.map(_run_axis_worker, axis_jobs)
